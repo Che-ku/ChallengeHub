@@ -39,7 +39,14 @@ This command will move the starter code to the **example** directory and create 
 
 - To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
 - If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+
+The application source uses JavaScript and JSX.
+
+## UI design system
+
+Challenge Hub uses the shared premium dark theme in [`src/constants/theme.js`](./src/constants/theme.js) for color, gradient, spacing, and typography tokens. Poppins and Inter are loaded before the app renders, and route styles consume the active theme. Set `THEME_MODE` to `light` or `system` in the theme config to switch modes without changing screen components.
+
+The challenge library includes 89 challenges across seven categories, including Kindness and Sustainability.
 
 ## Learn more
 
