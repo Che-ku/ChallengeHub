@@ -17,7 +17,8 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.cheq1.ChallengeHub"
     },
     "web": {
       "output": "server",
@@ -38,14 +39,24 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Challenge Hub to access your photos to set your profile picture.",
-          "cameraPermission": false,
+          "photosPermission": "Allow Challenge Hub to access your photos to choose a proof photo or profile picture.",
+          "cameraPermission": "Allow Challenge Hub to use your camera to take challenge proof photos.",
           "microphonePermission": false
         }
       ]
     ],
     "experiments": {
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "5250c894-a429-4874-86a5-ac84f9a21d87"
+      }
     }
   }
 }

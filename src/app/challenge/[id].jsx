@@ -1,7 +1,7 @@
 import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Image, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Alert, Image, Modal, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { AppPressable as TouchableOpacity } from '../../components/app-pressable';
 import { Typography } from '../../constants/theme';
@@ -25,6 +25,7 @@ export default function ChallengeDetailScreen() {
   const { challenges, completeChallenge } = useAppStore();
   const challenge = useMemo(() => challenges.find((item) => item.id === id), [challenges, id]);
   const [selectedImage, setSelectedImage] = useState(null);
+  const [proofPhotoOptionsVisible, setProofPhotoOptionsVisible] = useState(false);
   const [notes, setNotes] = useState('');
   const [elapsedMilliseconds, setElapsedMilliseconds] = useState(0);
   const [timerStartedAt, setTimerStartedAt] = useState(null);
@@ -53,7 +54,8 @@ export default function ChallengeDetailScreen() {
     );
   }
 
-  const handlePickPhoto = async () => {
+  const handleChoosePhoto = async () => {
+    setProofPhotoOptionsVisible(false);
     try {
       const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permissionResult.granted) {
@@ -71,6 +73,28 @@ export default function ChallengeDetailScreen() {
       }
     } catch (error) {
       Alert.alert('Could not open photos', error instanceof Error ? error.message : 'Please try again.');
+    }
+  };
+
+  const handleTakePhoto = async () => {
+    setProofPhotoOptionsVisible(false);
+    try {
+      const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permissionResult.granted) {
+        Alert.alert('Permission required', 'Allow camera access to take a proof photo.');
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        aspect: [4, 3],
+        quality: 0.8,
+      });
+      if (!result.canceled && result.assets[0]?.uri) {
+        setSelectedImage(result.assets[0].uri);
+      }
+    } catch (error) {
+      Alert.alert('Could not open camera', error instanceof Error ? error.message : 'Please try again.');
     }
   };
 
@@ -179,7 +203,7 @@ export default function ChallengeDetailScreen() {
 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Proof submission</Text>
-          <TouchableOpacity style={styles.photoButton} onPress={handlePickPhoto}>
+          <TouchableOpacity style={styles.photoButton} onPress={() => setProofPhotoOptionsVisible(true)}>
             <Text style={styles.photoButtonText}>{selectedImage ? 'Change photo' : 'Add proof photo'}</Text>
           </TouchableOpacity>
           {selectedImage
@@ -201,6 +225,31 @@ export default function ChallengeDetailScreen() {
           <Text style={styles.primaryButtonText}>{submitting ? 'Submitting...' : 'Submit challenge'}</Text>
         </TouchableOpacity>
       </ScrollView>
+      <Modal
+        visible={proofPhotoOptionsVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setProofPhotoOptionsVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.photoOptions}>
+            <Text style={styles.sectionTitle}>Add proof photo</Text>
+            <Text style={styles.description}>Take a new photo or choose one from your library.</Text>
+            <TouchableOpacity style={styles.photoOptionButton} onPress={handleTakePhoto}>
+              <Text style={styles.photoOptionText}>Take photo</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.photoOptionButton} onPress={handleChoosePhoto}>
+              <Text style={styles.photoOptionText}>Choose from library</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={() => setProofPhotoOptionsVisible(false)}
+            >
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -231,6 +280,12 @@ const createStyles = (theme) => StyleSheet.create({
   photoButton: { minHeight: 48, justifyContent: 'center', backgroundColor: theme.surfaceElevated, borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
   photoButtonText: { color: theme.secondary, fontWeight: '700' },
   previewImage: { width: '100%', height: 180, borderRadius: 16 },
+  modalBackdrop: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: '#00000099' },
+  photoOptions: { gap: 12, padding: 20, backgroundColor: theme.surface, borderRadius: 16 },
+  photoOptionButton: { minHeight: 48, justifyContent: 'center', alignItems: 'center', backgroundColor: theme.surfaceElevated, borderRadius: 12, paddingHorizontal: 16 },
+  photoOptionText: { color: theme.textPrimary, fontWeight: '700' },
+  cancelButton: { minHeight: 44, justifyContent: 'center', alignItems: 'center' },
+  cancelButtonText: { color: theme.secondary, fontWeight: '700' },
   placeholderBox: { height: 130, borderRadius: 16, backgroundColor: theme.surfaceElevated, borderStyle: 'dashed', borderWidth: 1, borderColor: theme.border, justifyContent: 'center', alignItems: 'center' },
   placeholderText: { color: theme.textSecondary, fontWeight: '600' },
   fieldLabel: { color: theme.textSecondary, fontWeight: '700' },
