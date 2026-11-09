@@ -61,21 +61,43 @@ export function getStreakStats(completions) {
     }
     return { current, longest };
 }
-export async function awardCompletion(userId, completion) {
+export async function awardCompletion(user, completion) {
     if (!firestoreDb)
-        return;
-    const userRef = doc(firestoreDb, 'users', userId);
-    await runTransaction(firestoreDb, async (transaction) => {
+        throw new Error('Firebase is not configured.');
+    const userRef = doc(firestoreDb, 'users', user.id);
+    const completionRef = doc(firestoreDb, 'users', user.id, 'completions', completion.id);
+    const leaderboardRef = doc(firestoreDb, 'leaderboard', user.id);
+    return runTransaction(firestoreDb, async (transaction) => {
         const snapshot = await transaction.get(userRef);
+        const existingCompletion = await transaction.get(completionRef);
+        if (existingCompletion.exists()) {
+            return { duplicate: true };
+        }
+        if (!snapshot.exists()) {
+            throw new Error('Your Firebase profile could not be found. Sign out and sign in again.');
+        }
         const current = snapshot.data();
         const existingXP = Number(current?.totalXP ?? 0);
         const nextXP = existingXP + completion.xpEarned;
         const nextLevel = calculateLevel(nextXP);
+        const updatedAt = new Date().toISOString();
+        const savedCompletion = { ...completion };
+        delete savedCompletion.proofPhotoUrl;
+        transaction.set(completionRef, savedCompletion);
         transaction.update(userRef, {
             totalXP: nextXP,
             currentLevel: nextLevel,
-            updatedAt: new Date().toISOString(),
+            lastCompletionDate: completion.completionDate,
+            updatedAt,
         });
+        transaction.set(leaderboardRef, {
+            uid: user.id,
+            fullName: current.fullName ?? user.fullName,
+            totalXP: nextXP,
+            currentLevel: nextLevel,
+            updatedAt,
+        });
+        return { duplicate: false, totalXP: nextXP, currentLevel: nextLevel };
     });
 }
 export function computeBadgeUnlocks(completions, currentStreak, weeklyGoalComplete) {

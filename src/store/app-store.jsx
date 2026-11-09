@@ -1,17 +1,54 @@
 import { jsx as _jsx } from "react/jsx-runtime";
 import { createContext, useContext, useEffect, useMemo, useState, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
-import { Platform } from 'react-native';
+import { onAuthStateChanged } from 'firebase/auth';
+import { firebaseAuth } from '../config/firebase';
 import { DEFAULT_BADGES, buildChallengeLibrary, DEFAULT_SEASONS } from '../data/challenges';
+import {
+    ensureFirebaseUserProfile,
+    getFirebaseAuthErrorMessage,
+    registerWithFirebase,
+    signInWithFirebase,
+    signOutFromFirebase,
+} from '../services/auth-service';
+import { getCompletionHistory, updateUserProfile } from '../services/challenge-service';
 import { getTodayKey } from '../services/streak';
-import { computeBadgeUnlocks, getStreakStats } from '../services/xp';
-const STORAGE_KEY = 'challenge-hub-state-v2';
+import { awardCompletion, computeBadgeUnlocks, getStreakStats } from '../services/xp';
 const ACCOUNTS_KEY = 'challenge-hub-accounts-v1';
 const LEGACY_STORAGE_KEY = 'challenge-hub-state-v1';
 const AppStoreContext = createContext(undefined);
 const challengeLibrary = buildChallengeLibrary();
+let legacyCredentialCleanup;
+
+function clearLegacyCredentials() {
+    if (!legacyCredentialCleanup) {
+        legacyCredentialCleanup = (async () => {
+            const rawAccounts = await AsyncStorage.getItem(ACCOUNTS_KEY);
+            if (rawAccounts) {
+                const accounts = JSON.parse(rawAccounts);
+                await Promise.all((Array.isArray(accounts) ? accounts : [])
+                    .filter((account) => typeof account.credentialKey === 'string')
+                    .map((account) => SecureStore.deleteItemAsync(account.credentialKey)));
+            }
+            await AsyncStorage.multiRemove([ACCOUNTS_KEY, 'challenge-hub-state-v2', LEGACY_STORAGE_KEY]);
+        })();
+    }
+    return legacyCredentialCleanup;
+}
+
+function getBadgesForCompletions(completions, weeklyGoal) {
+    const stats = getStreakStats(completions);
+    const unlockedIds = new Set(computeBadgeUnlocks(
+        completions,
+        stats.longest,
+        hasReachedWeeklyGoal(completions, weeklyGoal),
+    ).map((badge) => badge.id));
+    return DEFAULT_BADGES.map((badge) => ({
+        ...badge,
+        unlocked: unlockedIds.has(badge.id),
+    }));
+}
 function chooseDailyChallenge(challenges, history) {
     const knownIds = new Set(challenges.map((challenge) => challenge.id));
     const recentHistory = history.filter((id) => knownIds.has(id));
@@ -44,39 +81,6 @@ function hasReachedWeeklyGoal(completions, weeklyGoal) {
     }
     return false;
 }
-function createUser(id, fullName, email) {
-    const now = new Date().toISOString();
-    return {
-        id,
-        fullName,
-        email,
-        interests: [],
-        profilePictureUri: null,
-        totalXP: 0,
-        currentLevel: 1,
-        currentStreak: 0,
-        longestStreak: 0,
-        weeklyGoal: 5,
-        notificationPreferences: {
-            enabled: true,
-            time: '08:00',
-            streakReminders: true,
-            weeklyGoalReminders: true,
-        },
-        createdAt: now,
-        updatedAt: now,
-    };
-}
-async function passwordMatches(account, password) {
-    if (Platform.OS === 'web') {
-        if (!account.passwordSalt || !account.passwordDigest)
-            return false;
-        const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `${account.passwordSalt}:${password}`);
-        return digest === account.passwordDigest;
-    }
-    const storedPassword = await SecureStore.getItemAsync(account.credentialKey);
-    return storedPassword !== null && storedPassword === password;
-}
 const initialState = {
     user: null,
     challenges: challengeLibrary,
@@ -89,7 +93,7 @@ const initialState = {
 };
 export function AppProvider({ children }) {
     const [user, setUser] = useState(initialState.user);
-    const [challenges, setChallenges] = useState(initialState.challenges);
+    const [challenges] = useState(initialState.challenges);
     const [completions, setCompletions] = useState(initialState.completions);
     const [badges, setBadges] = useState(initialState.badges);
     const [team] = useState(initialState.team);
@@ -98,89 +102,77 @@ export function AppProvider({ children }) {
     const [onboardingComplete, setOnboardingComplete] = useState(initialState.onboardingComplete);
     const [isAuthenticated, setIsAuthenticated] = useState(false);
     const [isReady, setIsReady] = useState(false);
-    useEffect(() => {
-        const load = async () => {
-            try {
-                await AsyncStorage.removeItem(LEGACY_STORAGE_KEY);
-                const raw = await AsyncStorage.getItem(STORAGE_KEY);
-                if (!raw)
-                    return;
-                const parsed = JSON.parse(raw);
-                if (!parsed.isAuthenticated || !parsed.user)
-                    return;
-                const savedChallenges = (parsed.challenges ?? []).filter((savedChallenge) => (
-                        !challengeLibrary.some((challenge) => challenge.id === savedChallenge.id)
-                    ));
-                const loadedChallenges = [...challengeLibrary, ...savedChallenges];
-                setChallenges(loadedChallenges);
-                const savedCompletions = parsed.completions ?? [];
-                setCompletions(savedCompletions);
-                const challengeIds = new Set(loadedChallenges.map((challenge) => challenge.id));
-                const dailyChallengeHistory = (parsed.dailyChallengeHistory ?? [])
-                    .filter((id) => challengeIds.has(id));
-                const savedDailyChallengeId = challengeIds.has(parsed.dailyChallengeId)
-                    ? parsed.dailyChallengeId
-                    : null;
-                if (savedDailyChallengeId && !dailyChallengeHistory.includes(savedDailyChallengeId))
-                    dailyChallengeHistory.push(savedDailyChallengeId);
-                setDailyChallengeState({
-                    id: savedDailyChallengeId,
-                    date: parsed.dailyChallengeDate ?? null,
-                    history: dailyChallengeHistory,
-                });
-                const streakStats = getStreakStats(savedCompletions);
-                setUser({
-                    ...parsed.user,
-                    currentStreak: streakStats.current,
-                    longestStreak: streakStats.longest,
-                });
-                const savedBadges = new Map((parsed.badges ?? []).map((badge) => [badge.id, badge]));
-                const unlockedIds = new Set(computeBadgeUnlocks(
-                    savedCompletions,
-                    streakStats.longest,
-                    hasReachedWeeklyGoal(savedCompletions, parsed.user.weeklyGoal ?? 5),
-                ).map((badge) => badge.id));
-                setBadges(DEFAULT_BADGES.map((badge) => {
-                    const saved = savedBadges.get(badge.id);
-                    const unlocked = unlockedIds.has(badge.id);
-                    return {
-                        ...badge,
-                        unlocked,
-                        unlockedAt: unlocked ? saved?.unlockedAt ?? new Date().toISOString() : undefined,
-                    };
-                }));
-                if (parsed.onboardingComplete !== undefined)
-                    setOnboardingComplete(parsed.onboardingComplete);
-                setIsAuthenticated(true);
-            }
-            catch (error) {
-                console.warn('Failed to load app state', error);
-            }
-            finally {
-                setIsReady(true);
-            }
-        };
-        load();
+    const [authError, setAuthError] = useState('');
+    const hydrateFirebaseAccount = useCallback(async (authUser) => {
+        const profile = await ensureFirebaseUserProfile(authUser);
+        const savedCompletions = await getCompletionHistory(authUser.uid);
+        if (firebaseAuth.currentUser?.uid !== authUser.uid)
+            return null;
+        const streakStats = getStreakStats(savedCompletions);
+        setUser({
+            ...profile,
+            id: authUser.uid,
+            email: authUser.email,
+            currentStreak: streakStats.current,
+            longestStreak: streakStats.longest,
+        });
+        setCompletions(savedCompletions);
+        setBadges(getBadgesForCompletions(savedCompletions, profile.weeklyGoal ?? 5));
+        setOnboardingComplete(Boolean(profile.interests?.length));
+        setIsAuthenticated(true);
+        return profile;
     }, []);
     useEffect(() => {
-        if (!isReady)
-            return;
-        if (!user || !isAuthenticated) {
-            AsyncStorage.removeItem(STORAGE_KEY).catch(() => undefined);
-            return;
+        let mounted = true;
+        if (!firebaseAuth) {
+            clearLegacyCredentials().then(() => {
+                if (!mounted)
+                    return;
+                setAuthError('Firebase is not configured. Add your Firebase web app settings to the project .env file and restart Expo.');
+                setIsReady(true);
+            }).catch((error) => {
+                console.error('Failed to clear legacy local credentials', error);
+                if (mounted) {
+                    setAuthError(getFirebaseAuthErrorMessage(error));
+                    setIsReady(true);
+                }
+            });
+            return () => {
+                mounted = false;
+            };
         }
-        AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({
-            user,
-            challenges,
-            completions,
-            badges,
-            dailyChallengeId: dailyChallengeState.id,
-            dailyChallengeDate: dailyChallengeState.date,
-            dailyChallengeHistory: dailyChallengeState.history,
-            onboardingComplete,
-            isAuthenticated,
-        })).catch(() => undefined);
-    }, [isReady, user, challenges, completions, badges, dailyChallengeState, onboardingComplete, isAuthenticated]);
+        const unsubscribe = onAuthStateChanged(firebaseAuth, async (authUser) => {
+            try {
+                await clearLegacyCredentials();
+                if (!authUser) {
+                    setUser(null);
+                    setCompletions([]);
+                    setBadges(initialState.badges);
+                    setIsAuthenticated(false);
+                    setAuthError('');
+                    return;
+                }
+                await hydrateFirebaseAccount(authUser);
+                setAuthError('');
+            }
+            catch (error) {
+                console.error('Failed to load the Firebase account', error);
+                if (!authUser || firebaseAuth.currentUser?.uid === authUser.uid) {
+                    setUser(null);
+                    setIsAuthenticated(false);
+                    setAuthError(getFirebaseAuthErrorMessage(error));
+                }
+            }
+            finally {
+                if (mounted)
+                    setIsReady(true);
+            }
+        });
+        return () => {
+            mounted = false;
+            unsubscribe();
+        };
+    }, [hydrateFirebaseAccount]);
     useEffect(() => {
         if (!isReady || !isAuthenticated)
             return undefined;
@@ -205,65 +197,50 @@ export function AppProvider({ children }) {
         [challenges, dailyChallengeState.id],
     );
     const login = useCallback(async (email, password) => {
-        const identifier = email.trim().toLowerCase();
-        if (!identifier || !password) {
-            return { success: false, message: 'Enter your email or username and password.' };
+        const normalizedEmail = email.trim().toLowerCase();
+        if (!normalizedEmail || !password) {
+            return { success: false, message: 'Enter your email and password.' };
         }
-        const storedAccounts = await AsyncStorage.getItem(ACCOUNTS_KEY);
-        const accounts = storedAccounts ? JSON.parse(storedAccounts) : [];
-        const account = accounts.find((entry) => (entry.user.email === identifier || entry.user.fullName.trim().toLowerCase() === identifier));
-        if (!account) {
-            return { success: false, message: 'No account exists for these sign-in details. Please register first.' };
+        setAuthError('');
+        try {
+            const credential = await signInWithFirebase(normalizedEmail, password);
+            const profile = await hydrateFirebaseAccount(credential.user);
+            if (!profile)
+                return { success: false, message: 'Your sign-in changed. Please try again.' };
+            return {
+                success: true,
+                message: 'Signed in successfully.',
+                needsOnboarding: !Array.isArray(profile.interests) || profile.interests.length === 0,
+            };
+        } catch (error) {
+            return { success: false, message: getFirebaseAuthErrorMessage(error) };
         }
-        if (!(await passwordMatches(account, password))) {
-            return { success: false, message: 'The email or password is incorrect.' };
-        }
-        setUser(account.user);
-        setIsAuthenticated(true);
-        return {
-            success: true,
-            message: 'Signed in successfully.',
-            needsOnboarding: !Array.isArray(account.user.interests) || account.user.interests.length === 0,
-        };
-    }, []);
+    }, [hydrateFirebaseAccount]);
     const register = useCallback(async (fullName, email, password) => {
         const normalizedEmail = email.trim().toLowerCase();
-        if (!fullName.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || password.length < 6) {
+        const normalizedName = fullName.trim();
+        if (!normalizedName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || password.length < 6) {
             return { success: false, message: 'Enter your name, a valid email, and a password with at least 6 characters.' };
         }
-        const storedAccounts = await AsyncStorage.getItem(ACCOUNTS_KEY);
-        const accounts = storedAccounts ? JSON.parse(storedAccounts) : [];
-        const normalizedUsername = fullName.trim().toLowerCase();
-        if (accounts.some((entry) => (entry.user.email === normalizedEmail || entry.user.fullName.trim().toLowerCase() === normalizedUsername))) {
-            return { success: false, message: 'This email or username is already registered. Please sign in instead.' };
-        }
-        const emailDigest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, normalizedEmail);
-        const credentialKey = `challenge-hub-credential-${emailDigest}`;
-        const nextUser = createUser(`user-${emailDigest.slice(0, 16)}`, fullName.trim(), normalizedEmail);
-        let account = { user: nextUser, credentialKey };
-        if (Platform.OS === 'web') {
-            const passwordSalt = Crypto.randomUUID();
-            const passwordDigest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `${passwordSalt}:${password}`);
-            account = { ...account, passwordSalt, passwordDigest };
-        }
-        else {
-            await SecureStore.setItemAsync(credentialKey, password);
-        }
+        setAuthError('');
         try {
-            await AsyncStorage.setItem(ACCOUNTS_KEY, JSON.stringify([...accounts, account]));
+            const profile = await registerWithFirebase(normalizedName, normalizedEmail, password);
+            const authUser = firebaseAuth.currentUser;
+            if (authUser) {
+                await hydrateFirebaseAccount(authUser);
+            } else {
+                setUser(profile);
+                setCompletions([]);
+                setBadges(initialState.badges);
+                setOnboardingComplete(false);
+                setIsAuthenticated(true);
+            }
+            return { success: true, message: 'Your account is ready.', needsOnboarding: true };
         }
         catch (error) {
-            if (Platform.OS !== 'web') {
-                await SecureStore.deleteItemAsync(credentialKey);
-            }
-            throw error;
+            return { success: false, message: getFirebaseAuthErrorMessage(error) };
         }
-        setCompletions([]);
-        setBadges(DEFAULT_BADGES.map((badge) => ({ ...badge, unlocked: false })));
-        setUser(nextUser);
-        setIsAuthenticated(true);
-        return { success: true, message: 'Your account is ready.', needsOnboarding: true };
-    }, []);
+    }, [hydrateFirebaseAccount]);
     const updateProfile = useCallback(async ({ fullName, interests, profilePictureUri }) => {
         const normalizedName = fullName.trim();
         const normalizedInterests = [...new Set(interests)];
@@ -276,11 +253,6 @@ export function AppProvider({ children }) {
         if (!user) {
             return { success: false, message: 'Sign in again before updating your profile.' };
         }
-        const storedAccounts = await AsyncStorage.getItem(ACCOUNTS_KEY);
-        const accounts = storedAccounts ? JSON.parse(storedAccounts) : [];
-        if (accounts.some((entry) => entry.user.id !== user.id && entry.user.fullName.trim().toLowerCase() === normalizedName.toLowerCase())) {
-            return { success: false, message: 'That username is already in use.' };
-        }
         const nextUser = {
             ...user,
             fullName: normalizedName,
@@ -288,11 +260,12 @@ export function AppProvider({ children }) {
             profilePictureUri: profilePictureUri ?? user.profilePictureUri ?? null,
             updatedAt: new Date().toISOString(),
         };
-        const nextAccounts = accounts.map((entry) => entry.user.id === user.id ? { ...entry, user: nextUser } : entry);
-        if (!nextAccounts.some((entry) => entry.user.id === user.id)) {
-            return { success: false, message: 'Your account could not be found. Sign in again and retry.' };
-        }
-        await AsyncStorage.setItem(ACCOUNTS_KEY, JSON.stringify(nextAccounts));
+        await updateUserProfile(user.id, {
+            fullName: nextUser.fullName,
+            interests: nextUser.interests,
+            profilePictureUri: nextUser.profilePictureUri,
+            updatedAt: nextUser.updatedAt,
+        });
         setUser(nextUser);
         return { success: true, message: 'Profile updated.' };
     }, [user]);
@@ -307,9 +280,14 @@ export function AppProvider({ children }) {
         if (!challenge) {
             return { success: false, message: 'Challenge not found.' };
         }
+        if (!user) {
+            return { success: false, message: 'Sign in again before completing a challenge.' };
+        }
         const xpEarned = challenge.xpReward;
+        const completionDate = new Date().toISOString();
+        const completionDay = getTodayKey(new Date(completionDate));
         const completion = {
-            id: `completion-${Date.now()}`,
+            id: `completion-${encodeURIComponent(challengeId)}-${completionDay}`,
             challengeId,
             challengeTitle: challenge.title,
             category: challenge.category,
@@ -319,34 +297,30 @@ export function AppProvider({ children }) {
             duration: durationSeconds / 60,
             durationSeconds,
             xpEarned,
-            completionDate: new Date().toISOString(),
+            completionDate,
             createdAt: new Date().toISOString(),
         };
-        const completionDay = getTodayKey(new Date(completion.completionDate));
         const duplicate = completions.some((entry) => (
             entry.challengeId === challengeId && getTodayKey(new Date(entry.completionDate)) === completionDay
         ));
         if (duplicate) {
             return { success: false, message: 'This challenge was already completed today.' };
         }
+        const scoreUpdate = await awardCompletion(user, completion);
+        if (scoreUpdate.duplicate) {
+            return { success: false, message: 'This challenge was already completed today.' };
+        }
         const streakStats = getStreakStats([completion, ...completions]);
         const nextCompletions = [completion, ...completions];
         setCompletions(nextCompletions);
-        const nextStreak = streakStats.current;
-        setUser((currentUser) => {
-            if (!currentUser)
-                return currentUser;
-            const newXP = (currentUser.totalXP || 0) + xpEarned;
-            const level = Math.max(1, Math.floor(newXP / 100) + 1);
-            return {
-                ...currentUser,
-                totalXP: newXP,
-                currentLevel: level,
-                currentStreak: nextStreak,
-                longestStreak: streakStats.longest,
-                lastCompletionDate: completion.completionDate,
-                updatedAt: new Date().toISOString(),
-            };
+        setUser({
+            ...user,
+            totalXP: scoreUpdate.totalXP,
+            currentLevel: scoreUpdate.currentLevel,
+            currentStreak: streakStats.current,
+            longestStreak: streakStats.longest,
+            lastCompletionDate: completion.completionDate,
+            updatedAt: new Date().toISOString(),
         });
         const newlyUnlocked = new Set(computeBadgeUnlocks(
             nextCompletions,
@@ -365,7 +339,7 @@ export function AppProvider({ children }) {
             };
         });
         setBadges(nextBadges);
-        return { success: true, message: 'Challenge completed! XP awarded and proof saved.', xpEarned };
+        return { success: true, message: 'Challenge completed! XP and leaderboard updated.', xpEarned };
     }, [badges, challenges, completions, user]);
     const equipBadge = useCallback(async (badgeId) => {
         if (badgeId !== null && !badges.some((badge) => badge.id === badgeId && badge.unlocked)) {
@@ -375,19 +349,12 @@ export function AppProvider({ children }) {
             return { success: false, message: 'Sign in again before changing your equipped badge.' };
         }
         const nextUser = { ...user, equippedBadgeId: badgeId, updatedAt: new Date().toISOString() };
-        const storedAccounts = await AsyncStorage.getItem(ACCOUNTS_KEY);
-        const accounts = storedAccounts ? JSON.parse(storedAccounts) : [];
-        const nextAccounts = accounts.map((entry) => entry.user.id === user.id ? { ...entry, user: nextUser } : entry);
-        if (!nextAccounts.some((entry) => entry.user.id === user.id)) {
-            return { success: false, message: 'Your account could not be found. Sign in again and retry.' };
-        }
-        await AsyncStorage.setItem(ACCOUNTS_KEY, JSON.stringify(nextAccounts));
+        await updateUserProfile(user.id, { equippedBadgeId: badgeId });
         setUser(nextUser);
         return { success: true, message: badgeId ? 'Badge equipped.' : 'Equipped badge removed.' };
     }, [badges, user]);
-    const logout = useCallback(() => {
-        setIsAuthenticated(false);
-        setUser(null);
+    const logout = useCallback(async () => {
+        await signOutFromFirebase();
     }, []);
     const value = useMemo(() => ({
         user,
@@ -400,6 +367,7 @@ export function AppProvider({ children }) {
         dailyChallenge,
         isReady,
         isAuthenticated,
+        authError,
         login,
         register,
         updateProfile,
@@ -407,7 +375,7 @@ export function AppProvider({ children }) {
         completeChallenge,
         equipBadge,
         logout,
-    }), [user, challenges, completions, badges, team, seasonChallenges, onboardingComplete, dailyChallenge, isReady, isAuthenticated, completeChallenge, equipBadge, login, register, updateProfile, logout]);
+    }), [user, challenges, completions, badges, team, seasonChallenges, onboardingComplete, dailyChallenge, isReady, isAuthenticated, authError, completeChallenge, equipBadge, login, register, updateProfile, logout]);
     return _jsx(AppStoreContext.Provider, { value: value, children: children });
 }
 export function useAppStore() {

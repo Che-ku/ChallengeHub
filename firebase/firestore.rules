@@ -9,6 +9,10 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == userId;
     }
 
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
     match /users/{userId}/{document=**} {
       allow read, write: if isOwner(userId);
     }
@@ -29,8 +33,23 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    match /{document=**} {
+    match /leaderboard/{userId} {
       allow read: if signedIn();
+      allow create, update: if isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.keys().hasOnly(['uid', 'fullName', 'totalXP', 'currentLevel', 'updatedAt'])
+        && request.resource.data.keys().hasAll(['uid', 'fullName', 'totalXP', 'currentLevel', 'updatedAt'])
+        && request.resource.data.fullName is string
+        && request.resource.data.totalXP is int
+        && request.resource.data.totalXP >= 0
+        && request.resource.data.currentLevel is int
+        && request.resource.data.currentLevel >= 1
+        && request.resource.data.updatedAt is string;
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read: if false;
       allow write: if false;
     }
   }

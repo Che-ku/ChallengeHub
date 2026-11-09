@@ -1,4 +1,3 @@
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { router } from 'expo-router';
 import { useState } from 'react';
 import { Alert, KeyboardAvoidingView, Platform, StyleSheet, TextInput, View } from 'react-native';
@@ -10,7 +9,7 @@ import { useThemeStyles } from '../hooks/use-theme';
 import { useAppStore } from '../store/app-store';
 export default function AuthScreen() {
     const { theme, styles } = useThemeStyles(createStyles);
-    const { login, register } = useAppStore();
+    const { login, register, authError } = useAppStore();
     const [mode, setMode] = useState('login');
     const [fullName, setFullName] = useState('');
     const [email, setEmail] = useState('');
@@ -34,10 +33,7 @@ export default function AuthScreen() {
                 : await register(fullName.trim(), email.trim(), password);
             if (!result.success) {
                 setFormError(result.message);
-                if (result.message.startsWith('No account exists')) {
-                    setMode('register');
-                }
-                else if (result.message.startsWith('This email or username is already registered')) {
+                if (result.message.startsWith('This email is already registered')) {
                     setMode('login');
                 }
                 return;
@@ -51,12 +47,68 @@ export default function AuthScreen() {
             setLoading(false);
         }
     };
-    return (_jsx(SafeAreaView, { style: styles.safeArea, children: _jsx(KeyboardAvoidingView, { behavior: Platform.OS === 'ios' ? 'padding' : undefined, style: styles.container, children: _jsxs(View, { style: styles.card, children: [_jsx(Text, { style: styles.eyebrow, children: "Challenge Hub" }), _jsx(Text, { style: styles.title, children: mode === 'login' ? 'Welcome back' : 'Create your account' }), _jsx(Text, { style: styles.subtitle, children: mode === 'login'
-                            ? 'Log in to continue your streak and track your progress.'
-                            : 'Start your habit streak and unlock new challenges.' }), mode === 'register' && (                            _jsx(TextInput, { value: fullName, onChangeText: setFullName, placeholder: "Username", placeholderTextColor: theme.textSecondary, autoCapitalize: "words", style: styles.input })), _jsx(TextInput, { value: email, onChangeText: setEmail, placeholder: mode === 'login' ? 'Email or username' : 'Email', placeholderTextColor: theme.textSecondary, keyboardType: "email-address", autoCapitalize: "none", style: styles.input }), _jsx(TextInput, { value: password, onChangeText: setPassword, placeholder: "Password", placeholderTextColor: theme.textSecondary, secureTextEntry: true, style: styles.input }), _jsx(TouchableOpacity, { style: styles.primaryButton, onPress: handleSubmit, disabled: loading, children: _jsx(Text, { style: styles.primaryButtonText, children: loading ? 'Please wait...' : mode === 'login' ? 'Log in' : 'Create account' }) }), formError ? _jsx(Text, { style: styles.errorText, children: formError }) : null, _jsx(TouchableOpacity, { onPress: () => {
-                            setFormError('');
-                            setMode(mode === 'login' ? 'register' : 'login');
-                        }, children: _jsx(Text, { style: styles.toggleText, children: mode === 'login' ? 'Need an account? Sign up' : 'Already have an account? Log in' }) })] }) }) }));
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
+          <View style={styles.card}>
+            <Text style={styles.eyebrow}>Challenge Hub</Text>
+            <Text style={styles.title}>{mode === 'login' ? 'Welcome back' : 'Create your account'}</Text>
+            <Text style={styles.subtitle}>
+              {mode === 'login'
+                ? 'Log in to continue your streak and track your progress.'
+                : 'Start your habit streak and unlock new challenges.'}
+            </Text>
+            {mode === 'register' && (
+              <TextInput
+                value={fullName}
+                onChangeText={setFullName}
+                placeholder="Username"
+                placeholderTextColor={theme.textSecondary}
+                autoCapitalize="words"
+                style={styles.input}
+              />
+            )}
+            <TextInput
+              value={email}
+              onChangeText={setEmail}
+              placeholder="Email"
+              placeholderTextColor={theme.textSecondary}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoComplete="email"
+              style={styles.input}
+            />
+            <TextInput
+              value={password}
+              onChangeText={setPassword}
+              placeholder="Password"
+              placeholderTextColor={theme.textSecondary}
+              secureTextEntry
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              style={styles.input}
+            />
+            <TouchableOpacity style={styles.primaryButton} onPress={handleSubmit} disabled={loading}>
+              <Text style={styles.primaryButtonText}>
+                {loading ? 'Please wait...' : mode === 'login' ? 'Log in' : 'Create account'}
+              </Text>
+            </TouchableOpacity>
+            {formError || authError ? (
+              <Text style={styles.errorText}>{formError || authError}</Text>
+            ) : null}
+            <TouchableOpacity
+              onPress={() => {
+                setFormError('');
+                setMode(mode === 'login' ? 'register' : 'login');
+              }}
+            >
+              <Text style={styles.toggleText}>
+                {mode === 'login' ? 'Need an account? Sign up' : 'Already have an account? Log in'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    );
 }
 const createStyles = (theme) => StyleSheet.create({
     safeArea: {
